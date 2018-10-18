@@ -80,24 +80,27 @@ class install_serpent(Command):
     def run(self):
         # In Windows Serpent should be installed manually
         if os.name == 'nt':
-            print('To complete the installation you have to install Serpent: https://github.com/ethereum/serpent');
+            print('To complete the installation you have to install Serpent: https://github.com/ethereum/serpent')
             return
 
+        SERPENT_REPO =  "ethereum"
+        SERPENT_COMMIT = "0ec2042c71edf43ef719ea6268d4206a2424d5bb"
+
         print("downloading serpent.")
-        urllib.request.urlretrieve('https://github.com/ethereum/serpent/archive/master.zip', 'serpent.zip')
+        urllib.request.urlretrieve('https://codeload.github.com/{}/serpent/zip/{}'.format(SERPENT_REPO, SERPENT_COMMIT), 'serpent.zip')
 
         print("extracting.")
         with zipfile.ZipFile('serpent.zip', 'r') as zip_file:
             zip_file.extractall()
 
         print("making serpent.")
-        os.system('cd serpent-master && make')
+        os.system('cd serpent-{} && make'.format(SERPENT_COMMIT))
         print("install serpent using sudo.")
         print("hence it might request a password.")
-        os.system('cd serpent-master && sudo make install')
+        os.system('cd serpent-{} && sudo make install'.format(SERPENT_COMMIT))
 
         print("clean files.")
-        shutil.rmtree('serpent-master')
+        shutil.rmtree('serpent-{}'.format(SERPENT_COMMIT))
         os.remove('serpent.zip')
 
 class move_old_db(Command):
@@ -199,18 +202,19 @@ class bdist_egg(_bdist_egg):
         self.execute(post_install, (self, False), msg="Running post install tasks")
 
 required_packages = [
+    'appdirs==1.4.0',
+    'setuptools-markdown==0.2',
     'python-dateutil==2.5.3',
     'Flask-HTTPAuth==3.1.2',
     'Flask==0.11',
-    'appdirs==1.4.0',
     'colorlog==2.7.0',
     'json-rpc==1.10.3',
-    'pycoin==0.62',
+    'pycoin==0.77',
     'pycrypto==2.6.1',
     'pysha3==0.3',
-    'pytest==2.9.1',
+    'pytest==2.9.2',
     'pytest-cov==2.2.1',
-    'python-bitcoinlib==0.5.1',
+    # 'python-bitcoinlib==0.9.0', <-- restore this when python-bitcoinlib 0.9.0 is released
     'requests==2.10.0',
     'tendo==0.2.8',
     'xmltodict==0.10.1',
@@ -241,11 +245,11 @@ setup_options = {
         "Topic :: Software Development :: Libraries :: Python Modules",
         "Topic :: System :: Distributed Computing"
     ],
-    'download_url': 'https://github.com/CounterpartyXCP/counterparty-lib/releases/tag/v' + CURRENT_VERSION,
+    'download_url': 'https://github.com/CounterpartyXCP/counterparty-lib/releases/tag/' + CURRENT_VERSION,
     'provides': ['counterpartylib'],
     'packages': find_packages(),
     'zip_safe': False,
-    'setup_requires': ['appdirs'],
+    'setup_requires': ['appdirs', 'setuptools-markdown'],
     'install_requires': required_packages,
     'include_package_data': True,
     'cmdclass': {
@@ -258,6 +262,5 @@ setup_options = {
 
 if sys.argv[1] == 'sdist':
     setup_options['long_description_markdown_filename'] = 'README.md'
-    setup_options['setup_requires'].append('setuptools-markdown')
 
 setup(**setup_options)

@@ -6,13 +6,14 @@ UNIT = 100000000        # The same across assets.
 
 # Versions
 VERSION_MAJOR = 9
-VERSION_MINOR = 54
-VERSION_REVISION = 0
+VERSION_MINOR = 55
+VERSION_REVISION = 4
 VERSION_STRING = str(VERSION_MAJOR) + '.' + str(VERSION_MINOR) + '.' + str(VERSION_REVISION)
 
 
 # Counterparty protocol
 TXTYPE_FORMAT = '>I'
+SHORT_TXTYPE_FORMAT = 'B'
 
 TWO_WEEKS = 2 * 7 * 24 * 3600
 MAX_EXPIRATION = 4 * 2016   # Two months
@@ -83,8 +84,9 @@ BURN_END_MAINNET = 283810
 DEFAULT_REGULAR_DUST_SIZE = 5430         # TODO: This is just a guess. I got it down to 5530 satoshis.
 DEFAULT_MULTISIG_DUST_SIZE = 7800        # <https://bitcointalk.org/index.php?topic=528023.msg7469941#msg7469941>
 DEFAULT_OP_RETURN_VALUE = 0
-DEFAULT_FEE_PER_KB = 10000                # Bitcoin Core default is 10000.  # TODO: Lower 10x later, too.
-
+DEFAULT_FEE_PER_KB = 25000               # sane/low default, also used as minimum when estimated fee is used
+ESTIMATE_FEE_PER_KB = True               # when True will use `estimatefee` from bitcoind instead of DEFAULT_FEE_PER_KB
+ESTIMATE_FEE_NBLOCKS = 3
 
 # UI defaults
 DEFAULT_FEE_FRACTION_REQUIRED = .009   # 0.90%
@@ -107,5 +109,10 @@ UNDOLOG_MAX_PAST_BLOCKS = 100 #the number of past blocks that we store undolog h
 
 DEFAULT_UTXO_LOCKS_MAX_ADDRESSES = 1000
 DEFAULT_UTXO_LOCKS_MAX_AGE = 3.0 #in seconds
+
+ADDRESS_OPTION_REQUIRE_MEMO = 1
+ADDRESS_OPTION_MAX_VALUE = ADDRESS_OPTION_REQUIRE_MEMO # Or list of all the address options
+
+API_LIMIT_ROWS = 1000
 
 # vim: tabstop=8 expandtab shiftwidth=4 softtabstop=4

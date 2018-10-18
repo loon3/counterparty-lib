@@ -24,6 +24,7 @@ fi
 # http://veithen.github.io/2014/11/16/sigterm-propagation.html
 : ${PARAMS:=""}
 : ${COMMAND:="start"}
+
 trap 'kill -TERM $PID' TERM INT
 /usr/local/bin/counterparty-server ${PARAMS} ${COMMAND} &
 PID=$!

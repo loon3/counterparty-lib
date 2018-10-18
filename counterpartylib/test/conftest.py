@@ -22,12 +22,33 @@ from counterpartylib.lib import config, util, database, api
 
 
 # we swap out util.enabled with a custom one which has the option to mock the protocol changes
-MOCK_PROTOCOL_CHANGES = {}
-ALWAYS_LATEST_PROTOCOL_CHANGES = False
+MOCK_PROTOCOL_CHANGES = {
+    'bytespersigop': False,    # default to False to avoid all old vectors breaking
+}
+MOCK_PROTOCOL_CHANGES_AT_BLOCK = {
+    'subassets': {'block_index': 310495, 'allow_always_latest': True},  # override to be true only at block 310495
+    'short_tx_type_id': {'block_index': 310502, 'allow_always_latest': False},  # override to be true only at block 310502
+    'enhanced_sends': {'block_index': 310999, 'allow_always_latest': False},  # override to be true only at block 310999
+    'issuance_lock_fix': {'block_index': 310502, 'allow_always_latest': False},  # override to be true only at block 310502
+}
+DISABLE_ALL_MOCK_PROTOCOL_CHANGES_AT_BLOCK = False # if true, never look at MOCK_PROTOCOL_CHANGES_AT_BLOCK
+ENABLE_MOCK_PROTOCOL_CHANGES_AT_BLOCK = False # if true, always check MOCK_PROTOCOL_CHANGES_AT_BLOCK
+ALWAYS_LATEST_PROTOCOL_CHANGES = False # Even when this is true, this can be overridden if allow_always_latest is False in MOCK_PROTOCOL_CHANGES_AT_BLOCK
 _enabled = util.enabled
 def enabled(change_name, block_index=None):
+    # if explicitly set
     if change_name in MOCK_PROTOCOL_CHANGES:
         return MOCK_PROTOCOL_CHANGES[change_name]
+
+    # enable some protocol changes at a specific block for testing
+    if shouldCheckForMockProtocolChangesAtBlock(change_name):
+        _block_index = block_index
+        if _block_index is None:
+            _block_index = util.CURRENT_BLOCK_INDEX
+        logger = logging.getLogger(__name__)
+        if _block_index >= MOCK_PROTOCOL_CHANGES_AT_BLOCK[change_name]['block_index']:
+            return True
+        return False
 
     # used to force unit tests to always run against latest protocol changes
     if ALWAYS_LATEST_PROTOCOL_CHANGES:
@@ -35,10 +56,39 @@ def enabled(change_name, block_index=None):
         if change_name not in util.PROTOCOL_CHANGES:
             raise KeyError(change_name)
 
+        # print("ALWAYS_LATEST_PROTOCOL_CHANGES {} {} enabled: {}".format(change_name,block_index or util.CURRENT_BLOCK_INDEX,True))
         return True
     else:
+        # print("ALWAYS_LATEST_PROTOCOL_CHANGES {} {} enabled: {}".format(change_name,block_index or util.CURRENT_BLOCK_INDEX,_enabled(change_name, block_index)))
         return _enabled(change_name, block_index)
 util.enabled = enabled
+
+# This is true if ENABLE_MOCK_PROTOCOL_CHANGES_AT_BLOCK is set
+def shouldCheckForMockProtocolChangesAtBlock(change_name):
+    if DISABLE_ALL_MOCK_PROTOCOL_CHANGES_AT_BLOCK:
+        return False
+
+    if change_name not in MOCK_PROTOCOL_CHANGES_AT_BLOCK:
+        return False
+
+    if ENABLE_MOCK_PROTOCOL_CHANGES_AT_BLOCK:
+        return True
+
+    if 'allow_always_latest' in MOCK_PROTOCOL_CHANGES_AT_BLOCK[change_name] \
+        and not MOCK_PROTOCOL_CHANGES_AT_BLOCK[change_name]['allow_always_latest']:
+        return True
+
+    return False
+
+
+RANDOM_ASSET_INT = None
+_generate_random_asset = util.generate_random_asset
+def generate_random_asset ():
+    if RANDOM_ASSET_INT is None:
+        return _generate_random_asset()
+    else:
+        return 'A' + str(RANDOM_ASSET_INT)
+util.generate_random_asset = generate_random_asset
 
 
 def pytest_generate_tests(metafunc):
@@ -70,7 +120,6 @@ def pytest_addoption(parser):
     parser.addoption("--gentxhex", action='store_true', default=False, help="generate and print unsigned hex for *.compose() tests")
     parser.addoption("--savescenarios", action='store_true', default=False, help="generate sql dump and log in .new files")
     parser.addoption("--skiptestbook", default='no', help="skip test book(s) (use with one of the following values: `all`, `testnet` or `mainnet`)")
-    parser.addoption("--verbosediff", action='store_true', default=False, help="print verbose diff for vectors that fail")
 
 
 @pytest.fixture(scope="module")

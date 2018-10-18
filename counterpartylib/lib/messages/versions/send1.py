@@ -3,8 +3,11 @@
 """Create and parse 'send'-type messages."""
 
 import struct
+import json
+import logging
+logger = logging.getLogger(__name__)
 
-from ... import (config, exceptions, util)
+from ... import (config, exceptions, util, message_type)
 
 FORMAT = '>QQ'
 LENGTH = 8 + 8
@@ -37,11 +40,27 @@ def validate (db, source, destination, asset, quantity, block_index):
         problems.append('quantity must be in satoshis')
         return problems
 
-    if quantity < 0: problems.append('negative quantity')
+    if quantity < 0:
+        problems.append('negative quantity')
+
+    # For SQLite3
+    if quantity > config.MAX_INT:
+        problems.append('integer overflow')
 
     if util.enabled('send_destination_required'):  # Protocol change.
         if not destination:
-            status = problems.append('destination is required')
+            problems.append('destination is required')
+
+    if util.enabled('options_require_memo'):
+        # Check destination address options
+
+        cursor = db.cursor()
+        results = cursor.execute('SELECT options FROM addresses WHERE address=?', (destination,))
+        if results:
+            result = results.fetchone()
+            if result and result['options'] & config.ADDRESS_OPTION_REQUIRE_MEMO:
+                problems.append('destination requires memo')
+        cursor.close()
 
     return problems
 
@@ -51,6 +70,9 @@ def compose (db, source, destination, asset, quantity):
     # Just send BTC?
     if asset == config.BTC:
         return (source, [(destination, quantity)], None)
+
+    # resolve subassets
+    asset = util.resolve_subasset_longname(db, asset)
 
     #quantity must be in int satoshi (not float, string, etc)
     if not isinstance(quantity, int):
@@ -67,7 +89,7 @@ def compose (db, source, destination, asset, quantity):
     if problems: raise exceptions.ComposeError(problems)
 
     asset_id = util.get_asset_id(db, asset, block_index)
-    data = struct.pack(config.TXTYPE_FORMAT, ID)
+    data = message_type.pack(ID)
     data += struct.pack(FORMAT, asset_id, quantity)
 
     cursor.close()
@@ -120,8 +142,12 @@ def parse (db, tx, message):
         'quantity': quantity,
         'status': status,
     }
-    sql='insert into sends values(:tx_index, :tx_hash, :block_index, :source, :destination, :asset, :quantity, :status)'
-    cursor.execute(sql, bindings)
+    if "integer overflow" not in status and "quantity must be in satoshis" not in status:
+        sql = 'insert into sends values(:tx_index, :tx_hash, :block_index, :source, :destination, :asset, :quantity, :status, NULL)'
+        cursor.execute(sql, bindings)
+    else:
+        logger.warn("Not storing [send] tx [%s]: %s" % (tx['tx_hash'], status))
+        logger.debug("Bindings: %s" % (json.dumps(bindings), ))
 
 
     cursor.close()

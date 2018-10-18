@@ -73,28 +73,86 @@
         "minimum_version_major": 9,
         "minimum_version_minor": 52,
         "minimum_version_revision": 9,
-        "block_index": 500000,
+        "block_index": 423888,
         "testnet_block_index": 0
     },
 	"broadcast_invalid_check": {
         "minimum_version_major": 9,
         "minimum_version_minor": 55,
         "minimum_version_revision": 0,
-        "block_index": 500000,
+        "block_index": 423888,
         "testnet_block_index": 0
     },
 	"first_input_is_source": {
         "minimum_version_major": 9,
         "minimum_version_minor": 55,
         "minimum_version_revision": 0,
-        "block_index": 600000,
+        "block_index": 423888,
         "testnet_block_index": 0
     },
+<<<<<<< HEAD
     "btc_order_status": {
         "minimum_version_major": 9,
         "minimum_version_minor": 55,
         "minimum_version_revision": 0,
         "block_index": 600000,
         "testnet_block_index": 0
+=======
+	"broadcast_pack_text": {
+        "minimum_version_major": 9,
+        "minimum_version_minor": 55,
+        "minimum_version_revision": 0,
+        "block_index": 423888,
+        "testnet_block_index": 861987
+    },
+    "bytespersigop": {
+        "minimum_version_major": 9,
+        "minimum_version_minor": 54,
+        "minimum_version_revision": 0,
+        "block_index": 423888,
+        "testnet_block_index": 0
+    },
+    "integer_overflow_fix": {
+        "minimum_version_major": 9,
+        "minimum_version_minor": 54,
+        "minimum_version_revision": 0,
+        "block_index": 441563,
+        "testnet_block_index": 0
+    },
+    "subassets": {
+        "minimum_version_major": 9,
+        "minimum_version_minor": 55,
+        "minimum_version_revision": 2,
+        "block_index": 467417,
+        "testnet_block_index": 0
+    },
+    "short_tx_type_id": {
+        "minimum_version_major": 9,
+        "minimum_version_minor": 55,
+        "minimum_version_revision": 3,
+        "block_index": 489956,
+        "testnet_block_index": 1179400
+    },
+    "enhanced_sends": {
+        "minimum_version_major": 9,
+        "minimum_version_minor": 55,
+        "minimum_version_revision": 3,
+        "block_index": 489956,
+        "testnet_block_index": 1179400
+    },
+    "options_require_memo": {
+        "minimum_version_major": 9,
+        "minimum_version_minor": 55,
+        "minimum_version_revision": 3,
+        "block_index": 489956,
+        "testnet_block_index": 1179400
+    },
+    "issuance_lock_fix": {
+        "minimum_version_major": 9,
+        "minimum_version_minor": 55,
+        "minimum_version_revision": 3,
+        "block_index": 489956,
+        "testnet_block_index": 1179400
+>>>>>>> CounterpartyXCP/master
     }
 }

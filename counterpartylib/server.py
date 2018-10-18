@@ -81,6 +81,7 @@ def initialise(*args, **kwargs):
 
 def initialise_config(database_file=None, log_file=None, api_log_file=None,
                 testnet=False, testcoin=False,
+                api_limit_rows=1000,
                 backend_name=None, backend_connect=None, backend_port=None,
                 backend_user=None, backend_password=None,
                 backend_ssl=False, backend_ssl_no_verify=False,
@@ -94,7 +95,8 @@ def initialise_config(database_file=None, log_file=None, api_log_file=None,
                 check_asset_conservation=config.DEFAULT_CHECK_ASSET_CONSERVATION,
                 backend_ssl_verify=None, rpc_allow_cors=None, p2sh_dust_return_pubkey=None,
                 utxo_locks_max_addresses=config.DEFAULT_UTXO_LOCKS_MAX_ADDRESSES,
-                utxo_locks_max_age=config.DEFAULT_UTXO_LOCKS_MAX_AGE):
+                utxo_locks_max_age=config.DEFAULT_UTXO_LOCKS_MAX_AGE,
+                estimate_fee_per_kb=None):
 
     # Data directory
     data_dir = appdirs.user_data_dir(appauthor=config.XCP_NAME, appname=config.APP_NAME, roaming=True)
@@ -159,6 +161,8 @@ def initialise_config(database_file=None, log_file=None, api_log_file=None,
     def handle_exception(exc_type, exc_value, exc_traceback):
         logger.error("Unhandled Exception", exc_info=(exc_type, exc_value, exc_traceback))
     sys.excepthook = handle_exception
+
+    config.API_LIMIT_ROWS = api_limit_rows
 
     ##############
     # THINGS WE CONNECT TO
@@ -359,6 +363,9 @@ def initialise_config(database_file=None, log_file=None, api_log_file=None,
     config.UTXO_LOCKS_MAX_AGE = utxo_locks_max_age
     transaction.UTXO_LOCKS = None  # reset the UTXO_LOCKS (for tests really)
 
+    if estimate_fee_per_kb is not None:
+        config.ESTIMATE_FEE_PER_KB = estimate_fee_per_kb
+
     logger.info('Running v{} of counterparty-lib.'.format(config.VERSION_STRING))
 
 
@@ -404,13 +411,17 @@ def start_all(db):
     blocks.follow(db)
 
 
-def reparse(db, block_index=None):
+def reparse(db, block_index=None, quiet=True):
     connect_to_backend()
-    blocks.reparse(db, block_index=block_index)
+    blocks.reparse(db, block_index=block_index, quiet=quiet)
 
 
 def kickstart(db, bitcoind_dir):
     blocks.kickstart(db, bitcoind_dir=bitcoind_dir)
+
+
+def vacuum(db):
+    database.vacuum(db)
 
 
 def debug_config():

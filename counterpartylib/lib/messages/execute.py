@@ -7,7 +7,7 @@ import binascii
 import logging
 logger = logging.getLogger(__name__)
 
-from counterpartylib.lib import (util, config, exceptions)
+from counterpartylib.lib import (util, config, exceptions, message_type)
 from .scriptlib import (utils, blocks, processblock)
 
 FORMAT = '>20sQQQ'
@@ -82,7 +82,7 @@ def compose (db, source, contract_id, gasprice, startgas, value, payload_hex):
         raise processblock.ContractError('negative gasprice')
 
     # Pack.
-    data = struct.pack(config.TXTYPE_FORMAT, ID)
+    data = message_type.pack(ID)
     curr_format = FORMAT + '{}s'.format(len(payload))
     data += struct.pack(curr_format, binascii.unhexlify(contract_id), gasprice, startgas, value, payload)
 
@@ -127,7 +127,7 @@ def parse (db, tx, message):
         curr_format = FORMAT + '{}s'.format(len(message) - LENGTH)
         try:
             contract_id, gasprice, startgas, value, payload = struct.unpack(curr_format, message)
-            if gasprice > config.MAX_INT or startgas > config.MAX_INT: # TODO: define max for gasprice and startgas
+            if gasprice > config.MAX_INT or startgas > config.MAX_INT or value > config.MAX_INT: # TODO: define max for gasprice and startgas
                 raise exceptions.UnpackError()
         except (struct.error) as e:
             raise exceptions.UnpackError()

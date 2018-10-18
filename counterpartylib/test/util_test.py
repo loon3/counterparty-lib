@@ -46,7 +46,8 @@ COUNTERPARTYD_OPTIONS = {
     'backend_password': 'pass',
     'backend_ssl_no_verify': True,
     'p2sh_dust_return_pubkey': '11' * 33,
-    'utxo_locks_max_addresses': 0  # Disable UTXO locking for base test suite runs
+    'utxo_locks_max_addresses': 0,  # Disable UTXO locking for base test suite runs
+    'estimate_fee_per_kb': False
 }
 
 
@@ -125,7 +126,7 @@ def insert_block(db, block_index, parse_block=True):
     block_hash = util.dhash_string(chr(block_index))
     block_time = block_index * 1000
     block = (block_index, block_hash, block_time, None, None, None, None)
-    cursor.execute('''INSERT INTO blocks (block_index, block_hash, block_time, ledger_hash, txlist_hash, previous_block_hash, difficulty) 
+    cursor.execute('''INSERT INTO blocks (block_index, block_hash, block_time, ledger_hash, txlist_hash, previous_block_hash, difficulty)
                       VALUES (?,?,?,?,?,?,?)''', block)
     util.CURRENT_BLOCK_INDEX = block_index  # TODO: Correct?!
     cursor.close()
@@ -177,7 +178,7 @@ def insert_transaction(transaction, db):
     """Add a transaction to the database."""
     cursor = db.cursor()
     block = (transaction['block_index'], transaction['block_hash'], transaction['block_time'], None, None, None, None)
-    cursor.execute('''INSERT INTO blocks (block_index, block_hash, block_time, ledger_hash, txlist_hash, previous_block_hash, difficulty) 
+    cursor.execute('''INSERT INTO blocks (block_index, block_hash, block_time, ledger_hash, txlist_hash, previous_block_hash, difficulty)
                       VALUES (?,?,?,?,?,?,?)''', block)
     keys = ",".join(transaction.keys())
     cursor.execute('''INSERT INTO transactions ({}) VALUES (?,?,?,?,?,?,?,?,?,?,?)'''.format(keys), tuple(transaction.values()))
@@ -250,11 +251,13 @@ def run_scenario(scenario, rawtransactions_db):
     raw_transactions = []
     for tx in scenario:
         if tx[0] != 'create_next_block':
-            module = sys.modules['counterpartylib.lib.messages.{}'.format(tx[0])]
-            compose = getattr(module, 'compose')
-            unsigned_tx_hex = transaction.construct(db, compose(db, *tx[1]), **tx[2])
-            raw_transactions.append({tx[0]: unsigned_tx_hex})
-            insert_raw_transaction(unsigned_tx_hex, db, rawtransactions_db)
+            mock_protocol_changes = tx[3] if len(tx) == 4 else {}
+            with MockProtocolChangesContext(**(mock_protocol_changes or {})):
+                module = sys.modules['counterpartylib.lib.messages.{}'.format(tx[0])]
+                compose = getattr(module, 'compose')
+                unsigned_tx_hex = transaction.construct(db, compose(db, *tx[1]), **tx[2])
+                raw_transactions.append({tx[0]: unsigned_tx_hex})
+                insert_raw_transaction(unsigned_tx_hex, db, rawtransactions_db)
         else:
             create_next_block(db, block_index=config.BURN_START + tx[1], parse_block=tx[2] if len(tx) == 3 else True)
 
@@ -290,10 +293,14 @@ def clean_scenario_dump(scenario_name, dump):
     dump = dump.replace(standard_scenarios_params[scenario_name]['address1'], 'address1')
     dump = dump.replace(standard_scenarios_params[scenario_name]['address2'], 'address2')
     dump = re.sub('[a-f0-9]{64}', 'hash', dump)
-    dump = re.sub('X\'[A-F0-9]+\',1\);', '\'data\',1)', dump)
-    # ignore dust value
-    dump = re.sub(',7800,10000,\'data\',1\)', ',0,10000,\'data\',1\)', dump)
-    dump = re.sub(',5430,10000,\'data\',1\)', ',0,10000,\'data\',1\)', dump)
+    dump = re.sub('X\'[A-F0-9]+\',1\);', '\'data\',1);', dump)
+    # ignore fee values by replacing them with 10000 satoshis
+    dump = re.sub(',\d+,\'data\',1\);', ',10000,\'data\',1);', dump)
+    dump = re.sub(',\d+,X\'\',1\);', ',10000,\'data\',1);', dump)
+    # ignore dust value by replacing them with 0 satoshis
+    dump = re.sub(',7800,(\d+),\'data\',1\);', ',0,\1,\'data\',1);', dump)
+    dump = re.sub(',5430,(\d+),\'data\',1\);', ',0,\1,\'data\',1);', dump)
+
     return dump
 
 def check_record(record, server_db):
@@ -306,7 +313,7 @@ def check_record(record, server_db):
         value = cursor.execute(sql).fetchall()[0][field]
         assert value == record['value']
     else:
-        sql  = '''SELECT COUNT(*) AS c FROM {} '''.format(record['table'])
+        sql = '''SELECT COUNT(*) AS c FROM {} '''.format(record['table'])
         sql += '''WHERE '''
         bindings = []
         conditions = []
@@ -317,14 +324,18 @@ def check_record(record, server_db):
         sql += " AND ".join(conditions)
 
         count = list(cursor.execute(sql, tuple(bindings)))[0]['c']
-        if count != 1:
-            if pytest.config.option.verbosediff:
+        ok = (record.get('not', False) and count == 0) or count == 1
+
+        if not ok:
+            if pytest.config.getoption('verbose') >= 2:
+                print("expected values: ")
                 pprint.PrettyPrinter(indent=4).pprint(record['values'])
+                print("SELECT * FROM {} WHERE block_index = {}: ".format(record['table'], record['values']['block_index']))
                 pprint.PrettyPrinter(indent=4).pprint(list(cursor.execute('''SELECT * FROM {} WHERE block_index = ?'''.format(record['table']), (record['values']['block_index'],))))
 
             raise AssertionError("check_record \n" +
                                  "table=" + record['table'] + " \n" +
-                                 "condiitions=" + ",".join(conditions) + " \n" +
+                                 "conditions=" + ",".join(conditions) + " \n" +
                                  "bindings=" + ",".join(map(lambda v: str(v), bindings)))
 
 def vector_to_args(vector, functions=[]):
@@ -346,13 +357,18 @@ def exec_tested_method(tx_name, method, tested_method, inputs, server_db):
     """Execute tested_method within context and arguments."""
     if tx_name == 'transaction' and method == 'construct':
         return tested_method(server_db, inputs[0], **inputs[1])
-    elif (tx_name == 'util' and (method == 'api' or method == 'date_passed' or method == 'price' or method == 'generate_asset_id' \
-        or method == 'generate_asset_name' or method == 'dhash_string' or method == 'enabled' or method == 'get_url' or method == 'hexlify')) or tx_name == 'script' \
-        or (tx_name == 'blocks' and (method[:len('get_tx_info')] == 'get_tx_info')) or tx_name == 'transaction' or method == 'sortkeypicker'\
-        or tx_name == 'backend':
+    elif (tx_name == 'util' and (method in ['api','date_passed','price','generate_asset_id','generate_asset_name','dhash_string','enabled','get_url','hexlify','parse_subasset_from_asset_name','compact_subasset_longname','expand_subasset_longname',])) \
+        or tx_name == 'script' \
+        or (tx_name == 'blocks' and (method[:len('get_tx_info')] == 'get_tx_info')) or tx_name == 'transaction' or method == 'sortkeypicker' \
+        or tx_name == 'backend' \
+        or tx_name == 'message_type' \
+        or tx_name == 'address':
         return tested_method(*inputs)
     else:
-        return tested_method(server_db, *inputs)
+        if isinstance(inputs, dict):
+            return tested_method(server_db, **inputs)
+        else:
+            return tested_method(server_db, *inputs)
 
 def check_outputs(tx_name, method, inputs, outputs, error, records, comment, mock_protocol_changes, server_db):
     """Check actual and expected outputs of a particular function."""
@@ -363,44 +379,40 @@ def check_outputs(tx_name, method, inputs, outputs, error, records, comment, moc
         tested_module = sys.modules['counterpartylib.lib.messages.{}'.format(tx_name)]
     tested_method = getattr(tested_module, method)
 
-    # import here to avoid circular imports
-    from counterpartylib.test.conftest import MOCK_PROTOCOL_CHANGES
-    MOCK_PROTOCOL_CHANGES.clear()
-    if mock_protocol_changes:
-        MOCK_PROTOCOL_CHANGES.update(mock_protocol_changes)
-
-    test_outputs = None
-    if error is not None:
-        with pytest.raises(error[0]) as exception:
+    with MockProtocolChangesContext(**(mock_protocol_changes or {})):
+        test_outputs = None
+        if error is not None:
+            with pytest.raises(error[0]) as exception:
+                test_outputs = exec_tested_method(tx_name, method, tested_method, inputs, server_db)
+        else:
             test_outputs = exec_tested_method(tx_name, method, tested_method, inputs, server_db)
-    else:
-        test_outputs = exec_tested_method(tx_name, method, tested_method, inputs, server_db)
-        if pytest.config.option.gentxhex and method == 'compose':
-            print('')
-            tx_params = {
-                'encoding': 'multisig'
-            }
-            if tx_name == 'order' and inputs[1]=='BTC':
-                print('give btc')
-                tx_params['fee_provided'] = DP['fee_provided']
-            unsigned_tx_hex = transaction.construct(server_db, test_outputs, **tx_params)
-            print(tx_name)
-            print(unsigned_tx_hex)
+            if pytest.config.option.gentxhex and method == 'compose':
+                print('')
+                tx_params = {
+                    'encoding': 'multisig'
+                }
+                if tx_name == 'order' and inputs[1]=='BTC':
+                    print('give btc')
+                    tx_params['fee_provided'] = DP['fee_provided']
+                unsigned_tx_hex = transaction.construct(server_db, test_outputs, **tx_params)
+                print(tx_name)
+                print(unsigned_tx_hex)
 
-    if outputs is not None:
-        try:
-            assert outputs == test_outputs
-        except AssertionError:
-            if pytest.config.option.verbosediff:
-                msg = "expected outputs don't match test_outputs:\noutputs=\n" + pprint.pformat(outputs) + "\ntest_outputs=\n" + pprint.pformat(test_outputs)
-            else:
-                msg = "expected outputs don't match test_outputs: outputs=%s test_outputs=%s" % (outputs, test_outputs)
-            raise Exception(msg)
-    if error is not None:
-        assert str(exception.value) == error[1]
-    if records is not None:
-        for record in records:
-            check_record(record, server_db)
+        if outputs is not None:
+            try:
+                assert outputs == test_outputs
+            except AssertionError:
+                if pytest.config.getoption('verbose') >= 2:
+                    msg = "expected outputs don't match test_outputs:\noutputs=\n" + pprint.pformat(outputs) + "\ntest_outputs=\n" + pprint.pformat(test_outputs)
+                else:
+                    msg = "expected outputs don't match test_outputs: outputs=%s test_outputs=%s" % (outputs, test_outputs)
+                raise Exception(msg)
+        if error is not None:
+            assert str(exception.value) == error[1]
+        if records is not None:
+            for record in records:
+                check_record(record, server_db)
+
 
 def compare_strings(string1, string2):
     """Compare strings diff-style."""

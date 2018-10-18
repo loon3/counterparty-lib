@@ -66,6 +66,16 @@ def getrawmempool():
 def extract_addresses(txhash_list):
     return BACKEND().extract_addresses(txhash_list)
 
+
+def fee_per_kb(nblocks):
+    """
+    :param nblocks:
+    :return: fee_per_kb in satoshis, or None when unable to determine
+    """
+
+    return BACKEND().fee_per_kb(nblocks)
+
+
 def refresh_unconfirmed_transactions_cache(mempool_txhash_list):
     return BACKEND().refresh_unconfirmed_transactions_cache(mempool_txhash_list)
 
@@ -98,24 +108,11 @@ def get_tx_list(block):
 
     return (tx_hash_list, raw_transactions)
 
-def input_value_weight(amount):
-    # Prefer outputs less than dust size, then bigger is better.
-    if amount * config.UNIT <= config.DEFAULT_REGULAR_DUST_SIZE:
-        return 0
-    else:
-        return 1 / amount
-
 def sort_unspent_txouts(unspent, unconfirmed=False):
-    # Get deterministic results (for multiAPIConsensus type requirements), sort by timestamp and vout index.
-    # (Oldest to newest so the nodes don’t have to be exactly caught up to each other for consensus to be achieved.)
-    # searchrawtransactions doesn’t support unconfirmed transactions
-    try:
-        unspent = sorted(unspent, key=sortkeypicker(['ts', 'vout']))
-    except KeyError: # If timestamp isn’t given.
-        pass
-
-    # Sort by amount.
-    unspent = sorted(unspent, key=lambda x: input_value_weight(x['amount']))
+    # Filter out all dust amounts to avoid bloating the resultant transaction
+    unspent = list(filter(lambda x: x['amount'] * config.UNIT > config.DEFAULT_MULTISIG_DUST_SIZE, unspent))
+    # Sort by amount, using the largest UTXOs available
+    unspent = sorted(unspent, key=lambda x: x['amount'], reverse=True)
 
     return unspent
 
@@ -162,7 +159,7 @@ def get_unspent_txouts(source, unconfirmed=False, multisig_inputs=False, unspent
     """
     if not MEMPOOL_CACHE_INITIALIZED:
         raise MempoolError('Mempool is not yet ready; please try again in a few minutes.')
-    
+
     # Get all outputs.
     logger.debug('Getting outputs for {}'.format(source))
     if unspent_tx_hash:
@@ -269,15 +266,15 @@ def init_mempool_cache():
 
     #with this function, don't try to load in more than BACKEND_RAW_TRANSACTIONS_CACHE_SIZE entries
     num_tx = min(len(mempool_txhash_list), config.BACKEND_RAW_TRANSACTIONS_CACHE_SIZE)
-    mempool_tx = BACKEND().getrawtransaction_batch(mempool_txhash_list[:num_tx], verbose=True)
-    
+    mempool_tx = BACKEND().getrawtransaction_batch(mempool_txhash_list[:num_tx], skip_missing=True, verbose=True)
+
     vin_txhash_list = []
     max_remaining_num_tx = config.BACKEND_RAW_TRANSACTIONS_CACHE_SIZE - num_tx
     if max_remaining_num_tx:
         for txid in mempool_tx:
             tx = mempool_tx[txid]
             vin_txhash_list += [vin['txid'] for vin in tx['vin']]
-        BACKEND().getrawtransaction_batch(vin_txhash_list[:max_remaining_num_tx], verbose=True)
+        BACKEND().getrawtransaction_batch(vin_txhash_list[:max_remaining_num_tx], skip_missing=True, verbose=True)
 
     MEMPOOL_CACHE_INITIALIZED = True
     logger.info('Mempool cache initialized: {:.2f}s for {:,} transactions'.format(time.time() - start, num_tx + min(max_remaining_num_tx, len(vin_txhash_list))))

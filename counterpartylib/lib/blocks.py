@@ -31,7 +31,9 @@ from counterpartylib.lib import script
 from counterpartylib.lib import backend
 from counterpartylib.lib import log
 from counterpartylib.lib import database
+from counterpartylib.lib import message_type
 from .messages import (send, order, btcpay, issuance, broadcast, bet, dividend, burn, cancel, rps, rpsresolve, publish, execute, destroy)
+from .messages.versions import enhanced_send
 
 from .kickstart.blocks_parser import BlockchainParser, ChainstateParser
 from .kickstart.utils import ib2h
@@ -46,7 +48,7 @@ TABLES = ['credits', 'debits', 'messages'] + \
          'cancels', 'dividends', 'issuances', 'sends',
          'rps_match_expirations', 'rps_expirations', 'rpsresolves',
          'rps_matches', 'rps', 'executions', 'storage', 'suicides', 'nonces',
-         'postqueue', 'contracts', 'destructions', 'assets']
+         'postqueue', 'contracts', 'destructions', 'assets', 'addresses']
 # Compose list of tables tracked by undolog
 UNDOLOG_TABLES = copy.copy(TABLES)
 UNDOLOG_TABLES.remove('messages')
@@ -75,26 +77,31 @@ def parse_tx(db, tx):
         burn.parse(db, tx, MAINNET_BURNS)
         return
 
-    if len(tx['data']) > 4:
+    if len(tx['data']) > 1:
         try:
-            message_type_id = struct.unpack(config.TXTYPE_FORMAT, tx['data'][:4])[0]
+            message_type_id, message = message_type.unpack(tx['data'], tx['block_index'])
         except struct.error:    # Deterministically raised.
             message_type_id = None
+            message = None
     else:
         message_type_id = None
+        message = None
 
     # Protocol change.
     rps_enabled = tx['block_index'] >= 308500 or config.TESTNET
 
-    message = tx['data'][4:]
     if message_type_id == send.ID:
         send.parse(db, tx, message)
+    elif message_type_id == enhanced_send.ID and util.enabled('enhanced_sends', block_index=tx['block_index']):
+        enhanced_send.parse(db, tx, message)
     elif message_type_id == order.ID:
         order.parse(db, tx, message)
     elif message_type_id == btcpay.ID:
         btcpay.parse(db, tx, message)
     elif message_type_id == issuance.ID:
-        issuance.parse(db, tx, message)
+        issuance.parse(db, tx, message, message_type_id)
+    elif message_type_id == issuance.SUBASSET_ID and util.enabled('subassets', block_index=tx['block_index']):
+        issuance.parse(db, tx, message, message_type_id)
     elif message_type_id == broadcast.ID:
         broadcast.parse(db, tx, message)
     elif message_type_id == bet.ID:
@@ -326,7 +333,8 @@ def initialise(db):
     cursor.execute('''CREATE TABLE IF NOT EXISTS assets(
                       asset_id TEXT UNIQUE,
                       asset_name TEXT UNIQUE,
-                      block_index INTEGER)
+                      block_index INTEGER,
+                      asset_longname TEXT)
                    ''')
     cursor.execute('''CREATE INDEX IF NOT EXISTS
                       name_idx ON assets (asset_name)
@@ -334,10 +342,29 @@ def initialise(db):
     cursor.execute('''CREATE INDEX IF NOT EXISTS
                       id_idx ON assets (asset_id)
                    ''')
+
+    # Add asset_longname for sub-assets
+    #   SQLite can’t do `ALTER TABLE IF COLUMN NOT EXISTS`.
+    columns = [column['name'] for column in cursor.execute('''PRAGMA table_info(assets)''')]
+    if 'asset_longname' not in columns:
+        cursor.execute('''ALTER TABLE assets ADD COLUMN asset_longname TEXT''')
+    cursor.execute('''CREATE UNIQUE INDEX IF NOT EXISTS asset_longname_idx ON assets(asset_longname)''')
+
     cursor.execute('''SELECT * FROM assets WHERE asset_name = ?''', ('BTC',))
     if not list(cursor):
-        cursor.execute('''INSERT INTO assets VALUES (?,?,?)''', ('0', 'BTC', None))
-        cursor.execute('''INSERT INTO assets VALUES (?,?,?)''', ('1', 'XCP', None))
+        cursor.execute('''INSERT INTO assets VALUES (?,?,?,?)''', ('0', 'BTC', None, None))
+        cursor.execute('''INSERT INTO assets VALUES (?,?,?,?)''', ('1', 'XCP', None, None))
+
+    # Addresses
+    # Leaving this here because in the future this could work for other things besides broadcast
+    cursor.execute('''CREATE TABLE IF NOT EXISTS addresses(
+                      address TEXT UNIQUE,
+                      options INTEGER,
+                      block_index INTEGER)
+                   ''')
+    cursor.execute('''CREATE INDEX IF NOT EXISTS
+                      addresses_idx ON addresses (address)
+                   ''')
 
     # Consolidated
     send.initialise(db)
@@ -738,6 +765,11 @@ def reinitialise(db, block_index=None):
     if block_index:
         cursor.execute('''DELETE FROM transactions WHERE block_index > ?''', (block_index,))
         cursor.execute('''DELETE FROM blocks WHERE block_index > ?''', (block_index,))
+    elif config.TESTNET:  # block_index NOT specified and we are running testnet
+        # just blow away the consensus hashes with a full testnet reparse, as we could activate
+        # new features retroactively, which could otherwise lead to ConsensusError exceptions being raised.
+        logger.info("Testnet full reparse detected: Clearing all consensus hashes before performing reparse.")
+        cursor.execute('''UPDATE blocks SET ledger_hash = NULL, txlist_hash = NULL, messages_hash = NULL''')
 
     cursor.close()
 
@@ -806,6 +838,7 @@ def reparse(db, block_index=None, quiet=False):
         logger.info('Reparsing all transactions.')
 
     check.software_version()
+    reparse_start = time.time()
 
     # Reparse from the undolog if possible
     reparsed = reparse_from_undolog(db, block_index, quiet)
@@ -836,9 +869,13 @@ def reparse(db, block_index=None, quiet=False):
                                                                          previous_ledger_hash=previous_ledger_hash,
                                                                          previous_txlist_hash=previous_txlist_hash,
                                                                          previous_messages_hash=previous_messages_hash)
+                if quiet and block['block_index'] % 10 == 0:  # every 10 blocks print status
+                    root_logger.setLevel(logging.INFO)
                 logger.info('Block (re-parse): %s (hashes: L:%s / TX:%s / M:%s%s)' % (
                     block['block_index'], previous_ledger_hash[-5:], previous_txlist_hash[-5:], previous_messages_hash[-5:],
                     (' [overwrote %s]' % previous_found_messages_hash) if previous_found_messages_hash and previous_found_messages_hash != previous_messages_hash else ''))
+                if quiet and block['block_index'] % 10 == 0:
+                    root_logger.setLevel(logging.WARNING)
 
         if quiet:
             root_logger.setLevel(root_level)
@@ -851,6 +888,13 @@ def reparse(db, block_index=None, quiet=False):
         database.update_version(db)
 
     cursor.close()
+    reparse_end = time.time()
+    logger.info("Reparse took {:.3f} minutes.".format((reparse_end - reparse_start) / 60.0))
+
+    # on full reparse - vacuum the DB afterwards for better subsequent performance (especially on non-SSDs)
+    if not block_index:
+        database.vacuum(db)
+
 
 def list_tx(db, block_hash, block_index, block_time, tx_hash, tx_index, tx_hex=None):
     assert type(tx_hash) == str

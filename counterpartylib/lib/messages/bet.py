@@ -14,6 +14,7 @@ Expiring a bet match doesn’t re‐open the constituent bets. (So all bets may 
 
 import struct
 import decimal
+import json
 D = decimal.Decimal
 import time
 import logging
@@ -23,6 +24,7 @@ from counterpartylib.lib import config
 from counterpartylib.lib import exceptions
 from counterpartylib.lib import util
 from counterpartylib.lib import log
+from counterpartylib.lib import message_type
 
 FORMAT = '>HIQQdII'
 LENGTH = 2 + 4 + 8 + 8 + 8 + 4 + 4
@@ -231,6 +233,11 @@ def validate (db, source, feed_address, bet_type, deadline, wager_quantity,
 
     if leverage is None: leverage = 5040
 
+    # For SQLite3
+    if wager_quantity > config.MAX_INT or counterwager_quantity > config.MAX_INT or bet_type > config.MAX_INT \
+            or deadline > config.MAX_INT or leverage > config.MAX_INT or block_index + expiration > config.MAX_INT:
+        problems.append('integer overflow')
+
     # Look at feed to be bet on.
     cursor = db.cursor()
     broadcasts = list(cursor.execute('''SELECT * FROM broadcasts WHERE (status = ? AND source = ?) ORDER BY tx_index ASC''', ('valid', feed_address)))
@@ -281,10 +288,6 @@ def validate (db, source, feed_address, bet_type, deadline, wager_quantity,
     if expiration > config.MAX_EXPIRATION:
         problems.append('expiration overflow')
 
-    # For SQLite3
-    if wager_quantity > config.MAX_INT or counterwager_quantity > config.MAX_INT or bet_type > config.MAX_INT or deadline > config.MAX_INT or leverage > config.MAX_INT:
-        problems.append('integer overflow')
-
     return problems, leverage
 
 def compose (db, source, feed_address, bet_type, deadline, wager_quantity,
@@ -299,7 +302,7 @@ def compose (db, source, feed_address, bet_type, deadline, wager_quantity,
         problems.append('deadline passed')
     if problems: raise exceptions.ComposeError(problems)
 
-    data = struct.pack(config.TXTYPE_FORMAT, ID)
+    data = message_type.pack(ID)
     data += struct.pack(FORMAT, bet_type, deadline,
                         wager_quantity, counterwager_quantity, target_value,
                         leverage, expiration)
@@ -372,8 +375,12 @@ def parse (db, tx, message):
         'fee_fraction_int': fee_fraction * 1e8,
         'status': status,
     }
-    sql='insert into bets values(:tx_index, :tx_hash, :block_index, :source, :feed_address, :bet_type, :deadline, :wager_quantity, :wager_remaining, :counterwager_quantity, :counterwager_remaining, :target_value, :leverage, :expiration, :expire_index, :fee_fraction_int, :status)'
-    bet_parse_cursor.execute(sql, bindings)
+    if "integer overflow" not in status:
+        sql = 'insert into bets values(:tx_index, :tx_hash, :block_index, :source, :feed_address, :bet_type, :deadline, :wager_quantity, :wager_remaining, :counterwager_quantity, :counterwager_remaining, :target_value, :leverage, :expiration, :expire_index, :fee_fraction_int, :status)'
+        bet_parse_cursor.execute(sql, bindings)
+    else:
+        logger.warn("Not storing [bet] tx [%s]: %s" % (tx['tx_hash'], status))
+        logger.debug("Bindings: %s" % (json.dumps(bindings), ))
 
     # Match.
     if status == 'open' and tx['block_index'] != config.MEMPOOL_BLOCK_INDEX:

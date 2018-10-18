@@ -3,16 +3,21 @@
 """Destroy a quantity of an asset."""
 
 import struct
+import json
+import logging
+logger = logging.getLogger(__name__)
 
 from counterpartylib.lib import util
 from counterpartylib.lib import config
 from counterpartylib.lib import script
+from counterpartylib.lib import message_type
 from counterpartylib.lib.script import AddressError
 from counterpartylib.lib.exceptions import *
 
 FORMAT = '>QQ8s'
 LENGTH = 8 + 8 + 8
 ID = 110
+
 
 def initialise(db):
     cursor = db.cursor()
@@ -34,10 +39,12 @@ def initialise(db):
                       address_idx ON destructions (source)
                    ''')
 
+
 def pack(db, asset, quantity, tag):
-    data = struct.pack(config.TXTYPE_FORMAT, ID)
+    data = message_type.pack(ID)
     data += struct.pack(FORMAT, util.get_asset_id(db, asset, util.CURRENT_BLOCK_INDEX), quantity, tag)
     return data
+
 
 def unpack(db, message):
     try:
@@ -47,10 +54,11 @@ def unpack(db, message):
     except struct.error:
         raise UnpackError('could not unpack')
 
-    except util.AssetNameError:
+    except AssetIDError:
         raise UnpackError('asset id invalid')
 
     return asset, quantity, tag
+
 
 def validate (db, source, destination, asset, quantity):
 
@@ -74,7 +82,7 @@ def validate (db, source, destination, asset, quantity):
         raise ValidateError('quantity not integer')
 
     if quantity > config.MAX_INT:
-        raise ValidateError('quantity too large')
+        raise ValidateError('integer overflow, quantity too large')
 
     if quantity < 0:
         raise ValidateError('quantity negative')
@@ -85,41 +93,50 @@ def validate (db, source, destination, asset, quantity):
     if not config.TESTNET:
         raise ValidateError('disabled on mainnet')
 
+
 def compose (db, source, asset, quantity, tag):
+    # resolve subassets
+    asset = util.resolve_subasset_longname(db, asset)
 
     validate(db, source, None, asset, quantity)
     data = pack(db, asset, quantity, tag)
 
     return (source, [], data)
 
+
 def parse (db, tx, message):
     status = 'valid'
 
+    asset, quantity, tag = None, None, None
+
     try:
-        asset, quantity = unpack(message, tx['block_index'])
+        asset, quantity, tag = unpack(db, message)
         validate(db, tx['source'], tx['destination'], asset, quantity)
         util.debit(db, tx['source'], asset, quantity, 'destroy', tx['tx_hash'])
 
     except UnpackError as e:
-        asset, quantity = None, None
         status = 'invalid: ' + ''.join(e.args)
 
     except (ValidateError, BalanceError) as e:
         status = 'invalid: ' + ''.join(e.args)
 
-    finally:
-        bindings = {
-                    'tx_index': tx['tx_index'],
-                    'tx_hash': tx['tx_hash'],
-                    'block_index': tx['block_index'],
-                    'source': tx['source'],
-                    'asset': asset,
-                    'quantity': quantity,
-                    'tag': tag,
-                    'status': status,
-                   }
-        sql='insert into destructions values(:tx_index, :tx_hash, :block_index, :source, :asset, :quantity, :tag, :status)'
+    bindings = {
+                'tx_index': tx['tx_index'],
+                'tx_hash': tx['tx_hash'],
+                'block_index': tx['block_index'],
+                'source': tx['source'],
+                'asset': asset,
+                'quantity': quantity,
+                'tag': tag,
+                'status': status,
+               }
+    if "integer overflow" not in status:
+        sql = 'insert into destructions values(:tx_index, :tx_hash, :block_index, :source, :asset, :quantity, :tag, :status)'
         cursor = db.cursor()
         cursor.execute(sql, bindings)
+    else:
+        logger.warn("Not storing [destroy] tx [%s]: %s" % (tx['tx_hash'], status))
+        logger.debug("Bindings: %s" % (json.dumps(bindings), ))
+
 
 # vim: tabstop=8 expandtab shiftwidth=4 softtabstop=4

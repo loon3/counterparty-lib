@@ -6,8 +6,11 @@ offer_hash is the hash of either a bet or an order.
 
 import binascii
 import struct
+import json
+import logging
+logger = logging.getLogger(__name__)
 
-from counterpartylib.lib import (config, exceptions, util)
+from counterpartylib.lib import (config, exceptions, util, message_type)
 from . import (order, bet, rps)
 
 FORMAT = '>32s'
@@ -70,7 +73,7 @@ def compose (db, source, offer_hash):
     if problems: raise exceptions.ComposeError(problems)
 
     offer_hash_bytes = binascii.unhexlify(bytes(offer_hash, 'utf-8'))
-    data = struct.pack(config.TXTYPE_FORMAT, ID)
+    data = message_type.pack(ID)
     data += struct.pack(FORMAT, offer_hash_bytes)
     return (source, [], data)
 
@@ -116,8 +119,12 @@ def parse (db, tx, message):
         'offer_hash': offer_hash,
         'status': status,
     }
-    sql='INSERT INTO cancels VALUES (:tx_index, :tx_hash, :block_index, :source, :offer_hash, :status)'
-    cursor.execute(sql, bindings)
+    if "integer overflow" not in status:
+        sql='INSERT INTO cancels VALUES (:tx_index, :tx_hash, :block_index, :source, :offer_hash, :status)'
+        cursor.execute(sql, bindings)
+    else:
+        logger.warn("Not storing [cancel] tx [%s]: %s" % (tx['tx_hash'], status))
+        logger.debug("Bindings: %s" % (json.dumps(bindings), ))
 
     cursor.close()
 

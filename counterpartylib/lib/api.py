@@ -23,7 +23,7 @@ import binascii
 import struct
 import apsw
 import flask
-from flask.ext.httpauth import HTTPBasicAuth
+from flask_httpauth import HTTPBasicAuth
 import jsonrpc
 from jsonrpc import dispatcher
 from jsonrpc.exceptions import JSONRPCDispatchException
@@ -39,6 +39,7 @@ from counterpartylib.lib import database
 from counterpartylib.lib import transaction
 from counterpartylib.lib import blocks
 from counterpartylib.lib import script
+from counterpartylib.lib import message_type
 from counterpartylib.lib.messages import send
 from counterpartylib.lib.messages import order
 from counterpartylib.lib.messages import btcpay
@@ -68,6 +69,7 @@ API_TRANSACTIONS = ['bet', 'broadcast', 'btcpay', 'burn', 'cancel',
 COMMONS_ARGS = ['encoding', 'fee_per_kb', 'regular_dust_size',
                 'multisig_dust_size', 'op_return_value', 'pubkey',
                 'allow_unconfirmed_inputs', 'fee', 'fee_provided',
+                'estimate_fee_per_kb', 'estimate_fee_per_kb_nblocks',
                 'unspent_tx_hash', 'custom_inputs', 'dust_return_pubkey', 'disable_utxo_locks']
 
 API_MAX_LOG_SIZE = 10 * 1024 * 1024 #max log size of 20 MB before rotation (make configurable later)
@@ -147,8 +149,10 @@ def get_rows(db, table, filters=None, filterop='AND', order_by=None, order_dir=N
         raise APIError('Invalid order direction (ASC, DESC)')
     if not isinstance(limit, int):
         raise APIError('Invalid limit')
-    elif limit > 1000:
-        raise APIError('Limit should be lower or equal to 1000')
+    elif config.API_LIMIT_ROWS != 0 and limit > config.API_LIMIT_ROWS:
+        raise APIError('Limit should be lower or equal to %i' % config.API_LIMIT_ROWS)
+    elif config.API_LIMIT_ROWS != 0 and limit == 0:
+        raise APIError('Limit should be greater than 0')
     if not isinstance(offset, int):
         raise APIError('Invalid offset')
     # TODO: accept an object:  {'field1':'ASC', 'field2': 'DESC'}
@@ -187,6 +191,10 @@ def get_rows(db, table, filters=None, filterop='AND', order_by=None, order_dir=N
             raise APIError("Invalid operator for the field '%s'" % filter_['field'])
         if 'case_sensitive' in filter_ and not isinstance(filter_['case_sensitive'], bool):
             raise APIError("case_sensitive must be a boolean")
+
+    # special case for memo and memo_hex field searches
+    if table == 'sends':
+        adjust_get_sends_memo_filters(filters)
 
     # SELECT
     statement = '''SELECT * FROM {}'''.format(table)
@@ -251,16 +259,54 @@ def get_rows(db, table, filters=None, filterop='AND', order_by=None, order_dir=N
         if order_dir != None:
             statement += ''' {}'''.format(order_dir.upper())
     # LIMIT
-    if limit:
+    if limit and limit > 0:
         statement += ''' LIMIT {}'''.format(limit)
         if offset:
             statement += ''' OFFSET {}'''.format(offset)
 
-    return db_query(db, statement, tuple(bindings))
+
+    query_result = db_query(db, statement, tuple(bindings))
+
+    if table == 'sends':
+        # for sends, handle the memo field properly
+        return adjust_get_sends_results(query_result)
+
+    return query_result
+
+def adjust_get_sends_memo_filters(filters):
+    """Convert memo to a byte string.  If memo_hex is supplied, attempt to decode it and use that instead."""
+    for filter_ in filters:
+        if filter_['field'] == 'memo':
+            filter_['value'] = bytes(filter_['value'], 'utf-8')
+        if filter_['field'] == 'memo_hex':
+            # search the indexed memo field with a byte string
+            filter_['field'] = 'memo'
+            try:
+                filter_['value'] = bytes.fromhex(filter_['value'])
+            except ValueError as e:
+                raise APIError("Invalid memo_hex value")
+
+def adjust_get_sends_results(query_result):
+    """Format the memo_hex field.  Try and decode the memo from a utf-8 uncoded string. Invalid utf-8 strings return an empty memo."""
+    filtered_results = []
+    for send_row in list(query_result):
+        try:
+            if send_row['memo'] is None:
+                send_row['memo_hex'] = None
+                send_row['memo'] = None
+            else:
+                send_row['memo_hex'] = binascii.hexlify(send_row['memo']).decode('utf8')
+                send_row['memo'] = send_row['memo'].decode('utf-8')
+        except UnicodeDecodeError:
+            send_row['memo'] = ''
+        filtered_results.append(send_row)
+    return filtered_results
+
 
 def compose_transaction(db, name, params,
                         encoding='auto',
-                        fee_per_kb=config.DEFAULT_FEE_PER_KB,
+                        fee_per_kb=None,
+                        estimate_fee_per_kb=None, estimate_fee_per_kb_nblocks=config.ESTIMATE_FEE_NBLOCKS,
                         regular_dust_size=config.DEFAULT_REGULAR_DUST_SIZE,
                         multisig_dust_size=config.DEFAULT_MULTISIG_DUST_SIZE,
                         op_return_value=config.DEFAULT_OP_RETURN_VALUE,
@@ -300,9 +346,16 @@ def compose_transaction(db, name, params,
     for param in missing_params:
         params[param] = None
 
+    # dont override fee_per_kb if specified
+    if fee_per_kb is not None:
+        estimate_fee_per_kb = False
+    else:
+        fee_per_kb = config.DEFAULT_FEE_PER_KB
+
     tx_info = compose_method(db, **params)
     return transaction.construct(db, tx_info, encoding=encoding,
                                         fee_per_kb=fee_per_kb,
+                                        estimate_fee_per_kb=estimate_fee_per_kb, estimate_fee_per_kb_nblocks=estimate_fee_per_kb_nblocks,
                                         regular_dust_size=regular_dust_size,
                                         multisig_dust_size=multisig_dust_size,
                                         op_return_value=op_return_value,
@@ -325,13 +378,13 @@ def conditional_decorator(decorator, condition):
 def init_api_access_log(app):
     """Initialize API logger."""
     loggers = (logging.getLogger('werkzeug'), app.logger)
-    
+
     # Disable console logging...
     for l in loggers:
         l.setLevel(logging.INFO)
         l.propagate = False
 
-    # Log to file, if configured...    
+    # Log to file, if configured...
     if config.API_LOG:
         handler = logging_handlers.RotatingFileHandler(config.API_LOG, 'a', API_MAX_LOG_SIZE, API_MAX_LOG_COUNT)
         for l in loggers:
@@ -447,13 +500,12 @@ class APIServer(threading.Thread):
                 try:
                     transaction_args, common_args, private_key_wif = split_params(**kwargs)
                     return compose_transaction(db, name=tx, params=transaction_args, **common_args)
-                except TypeError as e:
-                    raise APIError(str(e))
-                except (script.AddressError, exceptions.ComposeError, exceptions.TransactionError, exceptions.BalanceError) as error:
+                except (TypeError, script.AddressError, exceptions.ComposeError, exceptions.TransactionError, exceptions.BalanceError) as error:
+                    # TypeError happens when unexpected keyword arguments are passed in
                     error_msg = "Error composing {} transaction via API: {}".format(tx, str(error))
                     logging.warning(error_msg)
                     raise JSONRPCDispatchException(code=JSON_RPC_ERROR_API_COMPOSE, message=error_msg)
-            
+
             return create_method
 
         for tx in API_TRANSACTIONS:
@@ -498,6 +550,7 @@ class APIServer(threading.Thread):
             elif asset == 'XCP':
                 return util.xcp_supply(db)
             else:
+                asset = util.resolve_subasset_longname(db, asset)
                 return util.asset_supply(db, asset)
 
         @dispatcher.add_method
@@ -512,6 +565,7 @@ class APIServer(threading.Thread):
                 raise APIError("assets must be a list of asset names, even if it just contains one entry")
             assetsInfo = []
             for asset in assets:
+                asset = util.resolve_subasset_longname(db, asset)
 
                 # BTC and XCP.
                 if asset in [config.BTC, config.XCP]:
@@ -522,6 +576,7 @@ class APIServer(threading.Thread):
 
                     assetsInfo.append({
                         'asset': asset,
+                        'asset_longname': None,
                         'owner': None,
                         'divisible': True,
                         'locked': False,
@@ -544,6 +599,7 @@ class APIServer(threading.Thread):
                     if e['locked']: locked = True
                 assetsInfo.append({
                     'asset': asset,
+                    'asset_longname': last_issuance['asset_longname'],
                     'owner': last_issuance['issuer'],
                     'divisible': bool(last_issuance['divisible']),
                     'locked': locked,
@@ -568,6 +624,10 @@ class APIServer(threading.Thread):
             return block
 
         @dispatcher.add_method
+        def fee_per_kb(nblocks=config.ESTIMATE_FEE_NBLOCKS):
+            return backend.fee_per_kb(nblocks)
+
+        @dispatcher.add_method
         def get_blocks(block_indexes, min_message_index=None):
             """fetches block info and messages for the specified block indexes
             @param min_message_index: Retrieve blocks from the message feed on or after this specific message index
@@ -590,7 +650,7 @@ class APIServer(threading.Thread):
             cursor.execute('SELECT * FROM messages WHERE block_index IN (%s) ORDER BY message_index ASC'
                 % (block_indexes_str,))
             messages = collections.deque(cursor.fetchall())
-            
+
             # Discard any messages less than min_message_index
             if min_message_index:
                 while len(messages) and messages[0]['message_index'] < min_message_index:
@@ -636,6 +696,7 @@ class APIServer(threading.Thread):
                 'bitcoin_block_count': latestBlockIndex,
                 'last_block': last_block,
                 'last_message_index': last_message['message_index'] if last_message else -1,
+                'api_limit_rows': config.API_LIMIT_ROWS,
                 'running_testnet': config.TESTNET,
                 'running_testcoin': config.TESTCOIN,
                 'version_major': config.VERSION_MAJOR,
@@ -667,6 +728,7 @@ class APIServer(threading.Thread):
 
         @dispatcher.add_method
         def get_holder_count(asset):
+            asset = util.resolve_subasset_longname(db, asset)
             holders = util.holders(db, asset)
             addresses = []
             for holder in holders:
@@ -675,6 +737,7 @@ class APIServer(threading.Thread):
 
         @dispatcher.add_method
         def get_holders(asset):
+            asset = util.resolve_subasset_longname(db, asset)
             holders = util.holders(db, asset)
             return holders
 
@@ -703,8 +766,7 @@ class APIServer(threading.Thread):
         @dispatcher.add_method
         def unpack(data_hex):
             data = binascii.unhexlify(data_hex)
-            message_type_id = struct.unpack(config.TXTYPE_FORMAT, data[:4])[0]
-            message = data[4:]
+            message_type_id, message = message_type.unpack(data)
 
             # TODO: Enabled only for `send`.
             if message_type_id == send.ID:
@@ -723,7 +785,7 @@ class APIServer(threading.Thread):
             if not config.RPC_NO_ALLOW_CORS:
                 response.headers['Access-Control-Allow-Origin'] = '*'
                 response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
-                response.headers['Access-Control-Allow-Headers'] = 'DNT,X-Mx-ReqToken,Keep-Alive,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type'
+                response.headers['Access-Control-Allow-Headers'] = 'DNT,X-Mx-ReqToken,Keep-Alive,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Authorization'
 
         @app.route('/', defaults={'args_path': ''}, methods=['GET', 'POST', 'OPTIONS'])
         @app.route('/<path:args_path>',  methods=['GET', 'POST', 'OPTIONS'])
@@ -855,7 +917,7 @@ class APIServer(threading.Thread):
                 except (script.AddressError, exceptions.ComposeError, exceptions.TransactionError, exceptions.BalanceError) as error:
                     error_msg = logging.warning("{} -- error composing {} transaction via API: {}".format(
                         str(error.__class__.__name__), query_type, str(error)))
-                    return flask.Response(error_msg, 400, mimetype='application/json')                        
+                    return flask.Response(error_msg, 400, mimetype='application/json')
             else:
                 # Need to de-generate extra_args to pass it through.
                 query_args = dict([item for item in extra_args])
@@ -887,11 +949,11 @@ class APIServer(threading.Thread):
 
         # Init the HTTP Server.
         init_api_access_log(app)
-        
+
         # Run app server (blocking)
         self.is_ready = True
         app.run(host=config.RPC_HOST, port=config.RPC_PORT, threaded=True)
-            
+
         db.close()
         return
 

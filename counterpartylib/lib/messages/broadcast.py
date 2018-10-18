@@ -20,18 +20,22 @@ fee_fraction: .05 XCP means 5%. It may be greater than 1, however; but
 because it is stored as a four‐byte integer, it may not be greater than about
 42.
 """
-
 import struct
 import decimal
+
 D = decimal.Decimal
 from fractions import Fraction
+import json
 import logging
 logger = logging.getLogger(__name__)
+
+from bitcoin.core import VarIntSerializer
 
 from counterpartylib.lib import exceptions
 from counterpartylib.lib import config
 from counterpartylib.lib import util
 from counterpartylib.lib import log
+from counterpartylib.lib import message_type
 from . import (bet)
 
 FORMAT = '>IdI'
@@ -70,6 +74,10 @@ def initialise(db):
 def validate (db, source, timestamp, value, fee_fraction_int, text, block_index):
     problems = []
 
+    # For SQLite3
+    if timestamp > config.MAX_INT or value > config.MAX_INT or fee_fraction_int > config.MAX_INT:
+        problems.append('integer overflow')
+
     if util.enabled('max_fee_fraction'):
         if fee_fraction_int >= config.UNIT:
             problems.append('fee fraction greater than or equal to 1')
@@ -96,6 +104,19 @@ def validate (db, source, timestamp, value, fee_fraction_int, text, block_index)
         if len(text) > 52:
             problems.append('text too long')
 
+    if util.enabled('options_require_memo') and text and text.lower().startswith('options'):
+        ops_spl = text.split(" ")
+        if len(ops_spl) == 2:
+            try:
+                options_int = int(ops_spl.pop())
+
+                if (options_int > config.MAX_INT) or (options_int < 0):
+                    problems.append('integer overflow')
+                elif options_int > config.ADDRESS_OPTION_MAX_VALUE:
+                    problems.append('options out of range')
+            except:
+                problems.append('options not an integer')
+
     return problems
 
 def compose (db, source, timestamp, value, fee_fraction, text):
@@ -106,13 +127,20 @@ def compose (db, source, timestamp, value, fee_fraction, text):
     problems = validate(db, source, timestamp, value, fee_fraction_int, text, util.CURRENT_BLOCK_INDEX)
     if problems: raise exceptions.ComposeError(problems)
 
-    data = struct.pack(config.TXTYPE_FORMAT, ID)
-    if len(text) <= 52:
-        curr_format = FORMAT + '{}p'.format(len(text) + 1)
+    data = message_type.pack(ID)
+
+    # always use custom length byte instead of problematic usage of 52p format and make sure to encode('utf-8') for length
+    if util.enabled('broadcast_pack_text'):
+        data += struct.pack(FORMAT, timestamp, value, fee_fraction_int)
+        data += VarIntSerializer.serialize(len(text.encode('utf-8')))
+        data += text.encode('utf-8')
     else:
-        curr_format = FORMAT + '{}s'.format(len(text))
-    data += struct.pack(curr_format, timestamp, value, fee_fraction_int,
-                        text.encode('utf-8'))
+        if len(text) <= 52:
+            curr_format = FORMAT + '{}p'.format(len(text) + 1)
+        else:
+            curr_format = FORMAT + '{}s'.format(len(text))
+
+        data += struct.pack(curr_format, timestamp, value, fee_fraction_int, text.encode('utf-8'))
     return (source, [], data)
 
 def parse (db, tx, message):
@@ -120,11 +148,19 @@ def parse (db, tx, message):
 
     # Unpack message.
     try:
-        if len(message) - LENGTH <= 52:
-            curr_format = FORMAT + '{}p'.format(len(message) - LENGTH)
+        if util.enabled('broadcast_pack_text'):
+            timestamp, value, fee_fraction_int, rawtext = struct.unpack(FORMAT + '{}s'.format(len(message) - LENGTH), message)
+            textlen = VarIntSerializer.deserialize(rawtext)
+            text = rawtext[-textlen:]
+
+            assert len(text) == textlen
         else:
-            curr_format = FORMAT + '{}s'.format(len(message) - LENGTH)
-        timestamp, value, fee_fraction_int, text = struct.unpack(curr_format, message)
+            if len(message) - LENGTH <= 52:
+                curr_format = FORMAT + '{}p'.format(len(message) - LENGTH)
+            else:
+                curr_format = FORMAT + '{}s'.format(len(message) - LENGTH)
+
+            timestamp, value, fee_fraction_int, text = struct.unpack(curr_format, message)
 
         try:
             text = text.decode('utf-8')
@@ -164,12 +200,39 @@ def parse (db, tx, message):
         'locked': lock,
         'status': status,
     }
-    sql = 'insert into broadcasts values(:tx_index, :tx_hash, :block_index, :source, :timestamp, :value, :fee_fraction_int, :text, :locked, :status)'
-    cursor.execute(sql, bindings)
+    if "integer overflow" not in status:
+        sql = 'insert into broadcasts values(:tx_index, :tx_hash, :block_index, :source, :timestamp, :value, :fee_fraction_int, :text, :locked, :status)'
+        cursor.execute(sql, bindings)
+    else:
+        logger.warn("Not storing [broadcast] tx [%s]: %s" % (tx['tx_hash'], status))
+        logger.debug("Bindings: %s" % (json.dumps(bindings), ))
 
     # stop processing if broadcast is invalid for any reason
     if util.enabled('broadcast_invalid_check') and status != 'valid':
         return
+
+    # Options? if the status is invalid the previous if should have catched it
+    if util.enabled('options_require_memo'):
+        if text and text.lower().startswith('options'):
+            ops_spl = text.split(" ")
+            if len(ops_spl) == 2:
+                change_ops = False
+                options_int = 0
+                try:
+                    options_int = int(ops_spl.pop())
+                    change_ops = True
+                except:
+                    pass
+
+                if change_ops:
+                    op_bindings = {
+                                'block_index': tx['block_index'],
+                                'address': tx['source'],
+                                'options': options_int
+                               }
+                    sql = 'insert or replace into addresses(address, options, block_index) values(:address, :options, :block_index)'
+                    cursor = db.cursor()
+                    cursor.execute(sql, op_bindings)
 
     # Negative values (default to ignore).
     if value is None or value < 0:
